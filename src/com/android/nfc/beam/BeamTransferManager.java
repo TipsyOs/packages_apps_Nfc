@@ -44,6 +44,8 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.Locale;
 
+import android.support.v4.content.FileProvider;
+
 /**
  * A BeamTransferManager object represents a set of files
  * that were received through NFC connection handover
@@ -174,6 +176,7 @@ public class BeamTransferManager implements Handler.Callback,
     void whitelistOppDevice(BluetoothDevice device) {
         if (DBG) Log.d(TAG, "Whitelisting " + device + " for BT OPP");
         Intent intent = new Intent(ACTION_WHITELIST_DEVICE);
+        intent.setPackage(mContext.getString(R.string.bluetooth_package));
         intent.putExtra(BluetoothDevice.EXTRA_DEVICE, device);
         mContext.sendBroadcastAsUser(intent, UserHandle.CURRENT);
     }
@@ -283,6 +286,7 @@ public class BeamTransferManager implements Handler.Callback,
 
     private void sendBluetoothCancelIntentAndUpdateState() {
         Intent cancelIntent = new Intent(ACTION_STOP_BLUETOOTH_TRANSFER);
+        cancelIntent.setPackage(mContext.getString(R.string.bluetooth_package));
         cancelIntent.putExtra(BeamStatusReceiver.EXTRA_TRANSFER_ID, mBluetoothTransferId);
         mContext.sendBroadcast(cancelIntent);
         updateStateAndNotification(STATE_CANCELLED);
@@ -470,9 +474,11 @@ public class BeamTransferManager implements Handler.Callback,
         String filePath = mPaths.get(0);
         Uri mediaUri = mMediaUris.get(filePath);
         Uri uri =  mediaUri != null ? mediaUri :
-            Uri.parse(ContentResolver.SCHEME_FILE + "://" + filePath);
+            FileProvider.getUriForFile(mContext, "com.google.android.nfc.fileprovider",
+                    new File(filePath));
         viewIntent.setDataAndTypeAndNormalize(uri, mMimeTypes.get(filePath));
-        viewIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
+        viewIntent.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK |
+                Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
         return viewIntent;
     }
 

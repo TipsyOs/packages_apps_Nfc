@@ -18,6 +18,7 @@ package com.android.nfc;
 
 import android.app.ActivityManager;
 import android.app.Application;
+import android.app.backup.BackupManager;
 import android.app.KeyguardManager;
 import android.app.PendingIntent;
 import android.app.admin.DevicePolicyManager;
@@ -141,7 +142,7 @@ public class NfcService implements DeviceHostListener {
     static final int NFC_POLL_A = 0x01;
     static final int NFC_POLL_B = 0x02;
     static final int NFC_POLL_F = 0x04;
-    static final int NFC_POLL_ISO15693 = 0x08;
+    static final int NFC_POLL_V = 0x08;
     static final int NFC_POLL_B_PRIME = 0x10;
     static final int NFC_POLL_KOVIO = 0x20;
 
@@ -193,6 +194,8 @@ public class NfcService implements DeviceHostListener {
     private final NfcUnlockManager mNfcUnlockManager;
 
     private final NfceeAccessControl mNfceeAccessControl;
+
+    private final BackupManager mBackupManager;
 
     List<PackageInfo> mInstalledPackages; // cached version of installed packages
 
@@ -254,6 +257,9 @@ public class NfcService implements DeviceHostListener {
     private ForegroundUtils mForegroundUtils;
 
     private static NfcService sService;
+
+    boolean mIsLiveCaseEnabled; // whether live cases are enabled
+    int mLiveCaseTechnology; // Technology mask of accepted NFC tags
 
     public static NfcService getInstance() {
         return sService;
@@ -355,6 +361,31 @@ public class NfcService implements DeviceHostListener {
         } catch (NotFoundException e) {
         }
 
+        try {
+            mIsLiveCaseEnabled = mContext.getResources().getBoolean(R.bool.enable_live_cases);
+        } catch (NotFoundException e) {
+            mIsLiveCaseEnabled = false;
+        }
+
+        mLiveCaseTechnology = 0;
+        String[] liveCaseTechList;
+        try {
+            liveCaseTechList = mContext.getResources().getStringArray(R.array.live_case_tag_types);
+            for (int i=0; i < liveCaseTechList.length; i++) {
+                if (liveCaseTechList[i].equals("TypeA")) {
+                    mLiveCaseTechnology |= NFC_POLL_A;
+                } else if (liveCaseTechList[i].equals("TypeB")) {
+                    mLiveCaseTechnology |= NFC_POLL_B;
+                } else if (liveCaseTechList[i].equals("TypeF")) {
+                    mLiveCaseTechnology |= NFC_POLL_F;
+                } else if (liveCaseTechList[i].equals("TypeV")) {
+                    mLiveCaseTechnology |= NFC_POLL_V;
+                }
+            }
+        } catch (NotFoundException e) {
+            mLiveCaseTechnology = 0;
+        }
+
         if (isNfcProvisioningEnabled) {
             mInProvisionMode = Settings.Secure.getInt(mContentResolver,
                     Settings.Global.DEVICE_PROVISIONED, 0) == 0;
@@ -362,7 +393,8 @@ public class NfcService implements DeviceHostListener {
             mInProvisionMode = false;
         }
 
-        mNfcDispatcher = new NfcDispatcher(mContext, mHandoverDataParser, mInProvisionMode);
+        mNfcDispatcher = new NfcDispatcher(mContext, mHandoverDataParser, mInProvisionMode,
+                mIsLiveCaseEnabled);
         mP2pLinkManager = new P2pLinkManager(mContext, mHandoverDataParser,
                 mDeviceHost.getDefaultLlcpMiu(), mDeviceHost.getDefaultLlcpRwSize());
 
@@ -390,6 +422,8 @@ public class NfcService implements DeviceHostListener {
         mNumTagsDetected = new AtomicInteger();
         mNumP2pDetected = new AtomicInteger();
         mNumHceDetected = new AtomicInteger();
+
+        mBackupManager = new BackupManager(mContext);
 
         // Intents for all users
         IntentFilter filter = new IntentFilter(Intent.ACTION_SCREEN_OFF);
@@ -650,6 +684,7 @@ public class NfcService implements DeviceHostListener {
         synchronized (NfcService.this) {
             mPrefsEditor.putBoolean(PREF_NFC_ON, on);
             mPrefsEditor.apply();
+            mBackupManager.dataChanged();
         }
     }
 
@@ -792,6 +827,7 @@ public class NfcService implements DeviceHostListener {
                 if (isNfcEnabled()) {
                     mP2pLinkManager.enableDisable(true, true);
                 }
+                mBackupManager.dataChanged();
             }
             return true;
         }
@@ -811,6 +847,7 @@ public class NfcService implements DeviceHostListener {
                 if (isNfcEnabled()) {
                     mP2pLinkManager.enableDisable(false, true);
                 }
+                mBackupManager.dataChanged();
             }
             return true;
         }
@@ -1057,7 +1094,7 @@ public class NfcService implements DeviceHostListener {
 
             techCodeToMask.put(TagTechnology.NFC_A, NfcService.NFC_POLL_A);
             techCodeToMask.put(TagTechnology.NFC_B, NfcService.NFC_POLL_B);
-            techCodeToMask.put(TagTechnology.NFC_V, NfcService.NFC_POLL_ISO15693);
+            techCodeToMask.put(TagTechnology.NFC_V, NfcService.NFC_POLL_V);
             techCodeToMask.put(TagTechnology.NFC_F, NfcService.NFC_POLL_F);
             techCodeToMask.put(TagTechnology.NFC_BARCODE, NfcService.NFC_POLL_KOVIO);
 
@@ -1449,7 +1486,7 @@ public class NfcService implements DeviceHostListener {
                 interrupt();
             }
             Log.e(TAG, "Watchdog triggered, aborting.");
-            mDeviceHost.doAbort();
+            mDeviceHost.doAbort(getName());
         }
 
         public synchronized void cancel() {
@@ -1538,7 +1575,7 @@ public class NfcService implements DeviceHostListener {
                 if ((mReaderModeParams.flags & NfcAdapter.FLAG_READER_NFC_F) != 0)
                     techMask |= NFC_POLL_F;
                 if ((mReaderModeParams.flags & NfcAdapter.FLAG_READER_NFC_V) != 0)
-                    techMask |= NFC_POLL_ISO15693;
+                    techMask |= NFC_POLL_V;
                 if ((mReaderModeParams.flags & NfcAdapter.FLAG_READER_NFC_BARCODE) != 0)
                     techMask |= NFC_POLL_KOVIO;
 
@@ -1546,16 +1583,21 @@ public class NfcService implements DeviceHostListener {
                 paramsBuilder.setEnableReaderMode(true);
             } else {
                 paramsBuilder.setTechMask(NfcDiscoveryParameters.NFC_POLL_DEFAULT);
-                paramsBuilder.setEnableP2p(mIsNdefPushEnabled);
+                paramsBuilder.setEnableP2p(true);
             }
         } else if (screenState == ScreenStateHelper.SCREEN_STATE_ON_LOCKED && mInProvisionMode) {
             paramsBuilder.setTechMask(NfcDiscoveryParameters.NFC_POLL_DEFAULT);
             // enable P2P for MFM/EDU/Corp provisioning
             paramsBuilder.setEnableP2p(true);
         } else if (screenState == ScreenStateHelper.SCREEN_STATE_ON_LOCKED &&
-                mNfcUnlockManager.isLockscreenPollingEnabled()) {
-            // For lock-screen tags, no low-power polling
-            paramsBuilder.setTechMask(mNfcUnlockManager.getLockscreenPollMask());
+                (mIsLiveCaseEnabled || mNfcUnlockManager.isLockscreenPollingEnabled())) {
+            int techMask = 0;
+            // enable polling for Live Case technologies
+            if (mIsLiveCaseEnabled)
+                techMask |= mLiveCaseTechnology;
+            if (mNfcUnlockManager.isLockscreenPollingEnabled())
+                techMask |= mNfcUnlockManager.getLockscreenPollMask();
+            paramsBuilder.setTechMask(techMask);
             paramsBuilder.setEnableLowPowerDiscovery(false);
             paramsBuilder.setEnableP2p(false);
         }
@@ -2160,6 +2202,10 @@ public class NfcService implements DeviceHostListener {
                 mP2pLinkManager.onUserSwitched(getUserId());
                 if (mIsHceCapable) {
                     mCardEmulationManager.onUserSwitched(getUserId());
+                }
+                int screenState = mScreenStateHelper.checkScreenState();
+                if (screenState != mScreenState) {
+                    new ApplyRoutingTask().execute(Integer.valueOf(screenState));
                 }
             }
         }
